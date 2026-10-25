@@ -11,7 +11,7 @@ Run the commands below from this implementation directory (`MLAfication/qknorm/`
 ## Repository layout
 
 - `gen/convert.py`: DeltaRoPE selection, QKNorm absorption, and SVDLLM V2
-  initialization.
+   initialization.
 - `gen/patch_func.py` and `gen/svdllm.py`: conversion primitives.
 - `src/mha2mla/train.py`: logit-distillation recovery training.
 - `src/mha2mla/patching_*.py`: QKNorm-compatible MLA and latent-cache forward
@@ -62,6 +62,11 @@ latency, throughput, and peak memory without a YAML file.
 
 Do not commit credentials, model weights, generated tensors, checkpoints,
 datasets, logs, virtual environments, or evaluation outputs.
+
+For the Qwen3-8B rank512/top-k8 quality control that preserves token-wise KNorm
+without its calibrated approximation, see [the exact-KNorm guide](EXACT_KNORM.md).
+This baseline supports ordinary expanded K/V caching, but not standard
+latent-cache/MQA decoding.
 
 For Table 1, the original `gen/compare_expect.py` compares mean key RMS norms
 across 1K–16K contexts after Partial-RoPE/SVD initialization. The same pass now

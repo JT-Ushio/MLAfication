@@ -90,6 +90,56 @@ def seperate_nope_rope(Wk, idx_mat, topk, num_heads=-1):
     Wk_nope = Wk[row_mask_flat]
     return Wk_rope, Wk_nope
 
+
+def build_mla_layer_tensors(attn, idx_mat, topk, down, up_k, up_v,
+                            knorm_mode="calibrated", calibrated_rms=None):
+    """Package the same Partial-RoPE/SVD factors with calibrated or exact KNorm.
+
+    Exact mode leaves both key projections unscaled. Its gamma_k follows the
+    per-head [RoPE, NoPE] permutation, so RMSNorm can be applied to the complete
+    reconstructed key before rotation. Never apply exact KNorm to weights that
+    already contain gamma_k / calibrated_rms.
+    """
+    if knorm_mode not in {"calibrated", "exact"}:
+        raise ValueError(f"Unknown knorm_mode: {knorm_mode!r}")
+    nq = attn.config.num_attention_heads
+    nkv = attn.config.num_key_value_heads
+    wq = attn.q_proj.weight.detach()
+    wqr, wqc = seperate_nope_rope(wq, idx_mat, topk, num_heads=nq)
+    wq = torch.cat([wqr.reshape(nq, -1, wq.size(1)),
+                    wqc.reshape(nq, -1, wq.size(1))], dim=1).reshape_as(wq)
+    gqr, gqc = seperate_nope_rope(attn.q_norm.weight.detach().repeat(nq),
+                                 idx_mat, topk, num_heads=nq)
+    gamma_q = torch.cat([gqr.reshape(nq, -1), gqc.reshape(nq, -1)], dim=1)
+    wk = attn.k_proj.weight.detach()
+    wkr, _ = seperate_nope_rope(wk, idx_mat, topk)
+    up_k = up_k.to(device=wk.device, dtype=wk.dtype)
+    gkr, gkc = seperate_nope_rope(attn.k_norm.weight.detach().repeat(nkv),
+                                 idx_mat, topk)
+    gamma_k = torch.cat([gkr.reshape(nkv, -1), gkc.reshape(nkv, -1)], dim=1)
+    if knorm_mode == "calibrated":
+        if calibrated_rms is None:
+            raise ValueError("calibrated KNorm requires one RMS value per KV head")
+        rms = calibrated_rms.to(device=wk.device).reshape(nkv, 1)
+        if not torch.isfinite(rms).all() or not (rms > 0).all():
+            raise ValueError("calibrated RMS values must be finite and positive")
+        wkr = (gkr.reshape(nkv, -1) / rms).reshape(-1, 1) * wkr
+        up_k = up_k * gkc[:, None]
+        up_k = (up_k.reshape(nkv, -1, down.size(0)) / rms[:, :, None]).reshape_as(up_k)
+    tensors = {
+        "q_proj": wq,
+        "gamma_q": gamma_q.flatten(),
+        "k_r_proj": wkr,
+        "kv_down_weight": down,
+        "v_up_weight": up_v,
+        "k_up_weight": up_k,
+    }
+    if knorm_mode == "exact":
+        tensors["gamma_k"] = gamma_k.flatten()
+    tensors = {name: value.detach().to(dtype=torch.bfloat16) for name, value in tensors.items()}
+    tensors["rope_index"] = torch.sort(idx_mat[:topk], dim=0).values.long()
+    return tensors
+
 def apply_U(x, repeat, U, parts):
     nh = x.size(-2)
     n_freqs = x.size(-1) // 2

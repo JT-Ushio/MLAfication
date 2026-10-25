@@ -1,0 +1,65 @@
+# Run from MLAfication/qknorm with 8 ranks: 8 * 2 * 4 = global batch 64.
+# Match the main-table rank512 checkpoint-2400: 629,145,600 nominal tokens.
+# Replace the model/data/output paths before launching. Use a NEW output directory.
+model_name_or_path: Qwen/Qwen3-8B-Base
+mla_tensor_path: artifacts/qwen3-8b-rank512-exact-knorm.pt
+knorm_mode: exact
+is_freeze_non_attn: true
+kl_temperature: 1.0
+
+output_dir: /path/to/new-experiments/qwen3-8b-rank512-exact-knorm
+run_name: qwen3-8b-rank512-exact-knorm
+report_to: none
+seed: 42
+data_seed: 42
+accelerator_config:
+  use_seedable_sampler: true
+bf16: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+deepspeed: cfgs/ds_zero2.example.json
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4
+max_steps: 2400
+dataloader_drop_last: true
+remove_unused_columns: false
+logging_strategy: steps
+logging_steps: 1
+save_strategy: steps
+save_steps: 480
+save_total_limit: 2
+save_only_model: true
+resume_from_checkpoint: null
+
+optim: adamw_torch
+learning_rate: 1.0e-4
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1.0e-8
+weight_decay: 0.0
+max_grad_norm: 1.0
+use_constant_with_warmup_decay_scheduler: true
+lr_scheduler_kwargs:
+  # Preserve the historical run's first 2400 updates: 144 warmup, then constant.
+  # Its decay starts at 4320, beyond the checkpoint used in the main table.
+  lr_warmup_steps: 144
+  lr_warmup_style: linear
+  lr_decay_starting_step: 4320
+  lr_decay_steps: 480
+  lr_decay_style: 1-sqrt
+  min_decay_lr: 0
+
+is_nanoset: true
+sequence_length: 4096
+trainset_seed: 42
+data_offset_steps: 0
+# Keep the historical shuffle population (307200 sequences), stopping at 2400.
+data_sampling_steps: 4800
+dataset_folders:
+  - /path/to/MHA2MLA-corpus-qwen2/fineweb-edu-dedup/
+  - /path/to/MHA2MLA-corpus-qwen2/cosmopedia-v2/
+  - /path/to/MHA2MLA-corpus-qwen2/python-edu/
+  - /path/to/MHA2MLA-corpus-qwen2/open-web-math/
+  - /path/to/MHA2MLA-corpus-qwen2/stackoverflow/
+dataset_weights: [0.7, 0.15, 0.08, 0.06, 0.01]

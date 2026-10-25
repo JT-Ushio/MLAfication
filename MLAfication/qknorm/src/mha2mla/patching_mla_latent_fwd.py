@@ -255,6 +255,13 @@ def latent_Qwen3Attention_instance_forward(
 
 
 def patch_mla_fwd_instance(model):
+    if getattr(model.config, "mla_knorm_mode", None) == "exact" or any(
+        hasattr(layer.self_attn, "k_norm") for layer in model.model.layers
+    ):
+        raise ValueError(
+            "Exact KNorm requires reconstructed per-head keys. Use patching_mla_fwd "
+            "with an ordinary dynamic KV cache; latent-cache/MQA decoding is unsupported."
+        )
     model_type = model.config.model_type
     all_rope_indices = torch.as_tensor(model.config.rope_indices, dtype=torch.long)
 

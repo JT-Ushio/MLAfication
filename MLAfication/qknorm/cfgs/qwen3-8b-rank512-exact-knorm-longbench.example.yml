@@ -1,0 +1,17 @@
+# Run eval/longbench.py with the original LongBench dataset snapshot.
+# Resolve mla_tensors.pt relative to ckpt_path; never use a calibrated artifact.
+model_name_or_path: Qwen/Qwen3-8B-Base
+ckpt_path: /path/to/new-experiments/qwen3-8b-rank512-exact-knorm/checkpoint-2400
+mla_tensor_path: mla_tensors.pt
+knorm_mode: exact
+is_baseline: false
+output_dir: /path/to/new-evaluation/qwen3-8b-rank512-exact-knorm/longbench-4k
+report_to: none
+seed: 42
+bf16: true
+per_device_eval_batch_size: 2
+longbench: true
+lb_max_tokens: 4096
+lb_batch_size: 8
+lb_max_samples_per_subset: null
+cache_implementation: dynamic

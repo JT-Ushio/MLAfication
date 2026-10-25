@@ -6,7 +6,10 @@ import re
 import string
 from collections import Counter, defaultdict
 from itertools import accumulate
-from transformers.trainer_utils import load_sharded_checkpoint
+try:
+    from transformers.trainer_utils import load_sharded_checkpoint
+except ImportError:  # Historical Transformers 4.x evaluation environment.
+    from transformers.modeling_utils import load_sharded_checkpoint
 from typing import TYPE_CHECKING, Optional
 from transformers import (
     HfArgumentParser,
@@ -756,18 +759,14 @@ def load_model(mha2mla_args, dtype, ckpt_path, cache_args: Optional["CacheArgume
         print("Loading checkpoint from", ckpt_path)
         patch_mla_fwd_instance = import_qwen3_mla_forward_patcher(cache_args)
         from patching_mlafication import patch_mlafication
+        from helpers import load_checkpoint
         # Instance
         model_config = AutoConfig.from_pretrained(ckpt_path)
         mha_model = AutoModelForCausalLM.from_pretrained(mha2mla_args.model_name_or_path)
         mla_model = patch_mlafication(mha_model, model_config, mha2mla_args)
         patch_mla_fwd_instance(mla_model)
         # Load weights
-        signle_weight_file = os.path.join(ckpt_path, "model.safetensors")
-        if os.path.exists(signle_weight_file):
-            state_dict = load_file(signle_weight_file)
-            mla_model.load_state_dict(state_dict, strict=False)
-        else:
-            load_result = load_sharded_checkpoint(mla_model, ckpt_path, strict=False)
+        load_checkpoint(mla_model, ckpt_path, strict=False)
         model = mla_model.to(dtype=dtype, device=device)
     elif not mha2mla_args.is_baseline:
         print("Loading step0 model from", mha2mla_args.mla_tensor_path)

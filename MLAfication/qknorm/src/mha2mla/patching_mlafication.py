@@ -99,6 +99,19 @@ def patch_mlafication(model, model_args, mha2mla_args):
     mla_tensor = torch.load(
         mha2mla_args.mla_tensor_path, map_location="cpu", weights_only=True
     )
+    # Legacy tensors absorb gamma_k / E[RMS(K)] into the key projections.
+    # Exact tensors instead carry gamma_k and keep those projections unscaled.
+    knorm_mode = "exact" if "gamma_k" in mla_tensor else "calibrated"
+    for requested in (getattr(mha2mla_args, "knorm_mode", None),
+                      getattr(model_args, "mla_knorm_mode", None)):
+        if requested is not None and requested != knorm_mode:
+            raise ValueError(
+                f"KNorm mode mismatch: requested {requested!r}, but MLA tensors "
+                f"are {knorm_mode!r}. Regenerate tensors with --knorm_mode {requested}; "
+                "calibrated key weights cannot be used with exact KNorm."
+            )
+    model.config.mla_knorm_mode = knorm_mode
+    mha2mla_args.knorm_mode = knorm_mode
 
     has_down_proj = "kv_down_weight" in mla_tensor
     q_proj_shape = mla_tensor["q_proj"][0].shape
@@ -152,6 +165,10 @@ def patch_mlafication(model, model_args, mha2mla_args):
         layer.self_attn.q_norm = MultiWeightRMSNorm(
             mla_tensor["gamma_q"][layer_idx].view(n_head, d_head), eps=eps
         )
+        if knorm_mode == "exact":
+            layer.self_attn.k_norm = MultiWeightRMSNorm(
+                mla_tensor["gamma_k"][layer_idx].view(n_k_head, d_head), eps=eps
+            )
 
         if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
             print(f"Layer {layer_idx}: Set up q_r_proj, k_r_proj, and kv_proj")

@@ -14,8 +14,6 @@ import torch.utils.data.distributed as torch_data_distributed
 if not hasattr(torch_data_distributed, "T_co"):
     torch_data_distributed.T_co = TypeVar("T_co", covariant=True)
 
-from transformers.trainer_utils import load_sharded_checkpoint
-
 from lighteval.models.utils import _get_dtype, _simplify_name, batched
 from lighteval.pipeline import (
     EnvConfig,
@@ -60,7 +58,7 @@ def create_load_func(mha2mla_args):
                 + (f"/{config.subfolder}" if config.subfolder is not None else ""),
                 max_memory=max_memory,
                 device_map=device_map,
-                dtype=torch_dtype,
+                torch_dtype=torch_dtype,
                 trust_remote_code=config.trust_remote_code,
                 cache_dir=env_config.cache_dir,
                 offload_folder=env_config.cache_dir,

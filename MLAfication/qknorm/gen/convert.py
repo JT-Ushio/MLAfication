@@ -16,6 +16,7 @@ from patch_func import (
     create_custom_apply_rotary_pos_emb_mha2mla,
     create_custom_sepearte_rope_nope_mha2mla,
     seperate_nope_rope,
+    build_mla_layer_tensors,
 )
 from svdllm import (
     original_svd,
@@ -29,12 +30,21 @@ from mha2mla_datasets import MHA2MLADataArguments, load_dataset
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate QKNorm-compatible MLA tensors for dense or MoE Qwen3."
+        description="Generate calibrated or exact-KNorm MLA tensors for dense or MoE Qwen3."
     )
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--lora_rank", type=int, required=True)
     parser.add_argument("--topk", type=int, default=8)
+    parser.add_argument(
+        "--knorm_mode", choices=("calibrated", "exact"), default="calibrated",
+        help="Use calibrated KNorm absorption (default), or preserve exact token-wise KNorm.",
+    )
+    parser.add_argument(
+        "--exact_knorm_output_path",
+        help="Also save an exact-KNorm control from the same Partial-RoPE/SVD factors; "
+             "only valid with --knorm_mode calibrated.",
+    )
     parser.add_argument("--num_samples", type=int, default=128)
     parser.add_argument("--sequence_length", type=int, default=4096)
     parser.add_argument(
@@ -49,7 +59,13 @@ def parse_args():
         default="scaled_svdllm",
         help="Low-rank initializer. The paper uses scaled_svdllm (SVDLLM V2).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.exact_knorm_output_path:
+        if args.knorm_mode != "calibrated":
+            parser.error("--exact_knorm_output_path requires --knorm_mode calibrated")
+        if os.path.abspath(args.output_path) == os.path.abspath(args.exact_knorm_output_path):
+            parser.error("The calibrated and exact output paths must differ")
+    return args
 
 
 cli_args = parse_args()
@@ -681,62 +697,17 @@ def do_SVD(svdnorm_balance_method):
         SVD_weight["W_down"][layer_idx] = W_down.to(dtype=torch.bfloat16)
 
 
-def save_mla_tensors():
+def save_mla_tensors(knorm_mode, output_path):
     n_layers = model.config.num_hidden_layers
-    nkv = model.config.num_key_value_heads
-    mla_tensor = [None for _ in range(n_layers)]
-    for layer_idx in range(n_layers):
-        nq = model.config.num_attention_heads
-        Wq = model.model.layers[
-            layer_idx
-        ].self_attn.q_proj.weight.clone()  # [nq*head_dim, hidden_dim]
-        Wqr, Wqc = seperate_nope_rope(
-            Wq, idx_mat=RANK[layer_idx], topk=topk, num_heads=nq
+    mla_tensor = [
+        build_mla_layer_tensors(
+            layer.self_attn, RANK[layer_idx], topk,
+            SVD_weight["W_down"][layer_idx], SVD_weight["W_up_k"][layer_idx],
+            SVD_weight["W_up_v"][layer_idx], knorm_mode=knorm_mode,
+            calibrated_rms=Ek[layer_idx] if knorm_mode == "calibrated" else None,
         )
-        Wq = torch.cat(
-            [Wqr.view(nq, -1, Wq.size(1)), Wqc.view(nq, -1, Wq.size(1))], dim=1
-        ).view(-1, Wq.size(1))  # [nq*head_dim, hidden_dim]
-        gamma_q = model.model.layers[
-            layer_idx
-        ].self_attn.q_norm.weight.clone()  # [head_dim]
-        gamma_q = gamma_q.repeat(nq)  # [nq*head_dim]
-        gamma_q_rope, gamma_q_nope = seperate_nope_rope(
-            gamma_q, idx_mat=RANK[layer_idx], topk=topk, num_heads=nq
-        )
-        gamma_q = torch.cat(
-            [gamma_q_rope.view(nq, -1), gamma_q_nope.view(nq, -1)], dim=1
-        ).view(-1)  # [nq*head_dim]
-        Wk = model.model.layers[layer_idx].self_attn.k_proj.weight
-        Wkr, Wkc = seperate_nope_rope(Wk, idx_mat=RANK[layer_idx], topk=topk)
-        W_up_k = SVD_weight["W_up_k"][layer_idx].to(
-            device=Wk.device, dtype=Wk.dtype
-        )  # [nkv * nopedim, r]
-        gamma_k = model.model.layers[
-            layer_idx
-        ].self_attn.k_norm.weight.clone()  # [head_dim]
-        gamma_k = gamma_k.repeat(nkv)  # [nkv*head_dim]
-        gamma_k_rope, gamma_k_nope = seperate_nope_rope(
-            gamma_k, idx_mat=RANK[layer_idx], topk=topk
-        )
-        gamma_k_rope = gamma_k_rope.view(nkv, -1)  # [nkv, rope_dim]
-        gamma_k_rope = gamma_k_rope / Ek[layer_idx]  # [nkv, rope_dim]
-        gamma_k_rope = gamma_k_rope.view(-1)  # [nkv*rope_dim]
-        Wkr = gamma_k_rope[:, None] * Wkr # [nkv*rope_dim, hidden_dim]
-        W_up_k = W_up_k * gamma_k_nope[:, None]
-        W_up_k = W_up_k.view(nkv, -1, lora_rank)  # [nkv, nopedim, r]
-        W_up_k = W_up_k / Ek[layer_idx][:, :, None]  # [nkv, nopedim, r]
-        W_up_k = W_up_k.view(-1, lora_rank)  # [nkv*nopedim, r]
-        mla_tensor[layer_idx] = {
-            "q_proj": Wq.to(dtype=torch.bfloat16),
-            "gamma_q": gamma_q.to(dtype=torch.bfloat16),
-            "k_r_proj": Wkr.to(dtype=torch.bfloat16),
-            "kv_down_weight": SVD_weight["W_down"][layer_idx].to(dtype=torch.bfloat16),
-            "v_up_weight": SVD_weight["W_up_v"][layer_idx].to(dtype=torch.bfloat16),
-            "k_up_weight": W_up_k.to(dtype=torch.bfloat16),
-            "rope_index": torch.sort(RANK[layer_idx][:topk], dim=0).values.to(
-                dtype=torch.long
-            ),
-        }
+        for layer_idx, layer in enumerate(model.model.layers)
+    ]
     keys = list(mla_tensor[0].keys())
     concated_mla_tensor = {
         key: torch.stack([mla_tensor[i][key] for i in range(n_layers)], dim=0)
@@ -749,10 +720,10 @@ def save_mla_tensors():
     concated_mla_tensor = {
         key: value.detach().cpu() for key, value in concated_mla_tensor.items()
     }
-    output_dir = os.path.dirname(os.path.abspath(cli_args.output_path))
+    output_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(output_dir, exist_ok=True)
-    torch.save(concated_mla_tensor, cli_args.output_path)
-    print(f"MLA tensors saved to {cli_args.output_path}")
+    torch.save(concated_mla_tensor, output_path)
+    print(f"MLA tensors saved to {output_path}")
 
 
 num_batches = num_samples // data_args.per_gpu_batchsize // world_size
@@ -845,27 +816,30 @@ if int(os.environ.get("RANK", 0)) == 0:
     print("ERROR_SUM_SVD:", [f"{x:.2f}" for x in ERROR_SUM_SVD])
     print("ERROR_SUM_SVD AVG:", f"{sum(ERROR_SUM_SVD) / len(ERROR_SUM_SVD):.2f}")
 
-Ek = [None for _ in range(n_layers)]
-handles = register_hook(hook_collect_E)
-model_forward(need_count_tokens=False, offset_batches=0)
-remove_hooks(handles)
-for value in Ek:
-    dist.all_reduce(value, op=dist.ReduceOp.SUM)
-Ek = [ek / NUM_TOKENS for ek in Ek]
-print(f"Ek: {Ek}")
+if cli_args.knorm_mode == "calibrated":
+    Ek = [None for _ in range(n_layers)]
+    handles = register_hook(hook_collect_E)
+    model_forward(need_count_tokens=False, offset_batches=0)
+    remove_hooks(handles)
+    for value in Ek:
+        dist.all_reduce(value, op=dist.ReduceOp.SUM)
+    Ek = [ek / NUM_TOKENS for ek in Ek]
+    print(f"Ek: {Ek}")
 
-ERROR_SUM_E = [0 for _ in range(n_layers)]
-handles = register_hook(hook_test_E)
-nll, tok = model_forward_ppl(need_count_tokens=False, offset_batches=0)
-remove_hooks(handles)
-if int(os.environ.get("RANK", 0)) == 0:
-    ERROR_SUM_E = [x / NUM_TOKENS for x in ERROR_SUM_E]
-    print("ERROR_SUM_E:", [f"{x:.2f}" for x in ERROR_SUM_E])
-    print("ERROR_SUM_E AVG:", f"{sum(ERROR_SUM_E) / len(ERROR_SUM_E):.2f}")
-print("NLL/TOK:", f"{nll / tok:.6f}")
-print("PPL:", f"{torch.exp(torch.tensor(nll / tok)).item():.4f}")
+    ERROR_SUM_E = [0 for _ in range(n_layers)]
+    handles = register_hook(hook_test_E)
+    nll, tok = model_forward_ppl(need_count_tokens=False, offset_batches=0)
+    remove_hooks(handles)
+    if int(os.environ.get("RANK", 0)) == 0:
+        ERROR_SUM_E = [x / NUM_TOKENS for x in ERROR_SUM_E]
+        print("ERROR_SUM_E:", [f"{x:.2f}" for x in ERROR_SUM_E])
+        print("ERROR_SUM_E AVG:", f"{sum(ERROR_SUM_E) / len(ERROR_SUM_E):.2f}")
+    print("NLL/TOK:", f"{nll / tok:.6f}")
+    print("PPL:", f"{torch.exp(torch.tensor(nll / tok)).item():.4f}")
 
 if rank == 0:
-    save_mla_tensors()
+    save_mla_tensors(cli_args.knorm_mode, cli_args.output_path)
+    if cli_args.exact_knorm_output_path:
+        save_mla_tensors("exact", cli_args.exact_knorm_output_path)
 
 dist.destroy_process_group()

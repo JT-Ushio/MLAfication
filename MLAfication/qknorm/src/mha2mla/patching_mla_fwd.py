@@ -66,6 +66,13 @@ def custom_Qwen3Attention_instance_forward(
     cache_position: Optional[torch.LongTensor] = None,
     **kwargs: Unpack[FlashAttentionKwargs],
 ):
+    # Transformers 4.x passes the cache under the singular attention argument.
+    # Consume it here instead of silently dropping cached keys during decoding.
+    legacy_cache = kwargs.pop("past_key_value", None)
+    if past_key_values is None:
+        past_key_values = legacy_cache
+    elif legacy_cache is not None and legacy_cache is not past_key_values:
+        raise ValueError("Conflicting past_key_value and past_key_values caches")
     input_shape = hidden_states.shape[:-1]
     num_kv_heads = self.config.num_key_value_heads
     num_q_heads = self.config.num_attention_heads
@@ -89,6 +96,8 @@ def custom_Qwen3Attention_instance_forward(
     value_states = v.view(v_shape).transpose(1, 2)
 
     if hasattr(self, "k_norm"):
+        # Normalize all reconstructed key dimensions jointly, before Partial-RoPE.
+        # Normalizing the RoPE and NoPE parts separately changes the model.
         k = torch.cat([k_r, k_c], dim=-1)
         k = self.k_norm(k.transpose(1, 2)).transpose(1, 2)
         k_r, k_c = k[..., : k_r.size(-1)], k[..., k_r.size(-1) :]

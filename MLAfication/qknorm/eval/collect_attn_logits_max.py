@@ -32,6 +32,7 @@ if gen_directory not in sys.path:
 from mha2mla_datasets import MHA2MLADataArguments, load_dataset
 from patching_mlafication import patch_mlafication
 from patching_mla_fwd import patch_mla_fwd_instance
+from helpers import load_checkpoint
 
 
 def parse_args():
@@ -156,14 +157,13 @@ else:
         if getattr(mha2mla_args, "model_name_or_path", None) is None:
             mha2mla_args.model_name_or_path = args.model_name_or_path
 
+        if not os.path.isabs(mha2mla_args.mla_tensor_path):
+            mha2mla_args.mla_tensor_path = os.path.join(
+                args.ckpt_path, mha2mla_args.mla_tensor_path
+            )
         mla_model = patch_mlafication(mha_model, model_config, mha2mla_args)
         patch_mla_fwd_instance(mla_model)
-        signle_weight_file = os.path.join(args.ckpt_path, "model.safetensors")
-        if os.path.exists(signle_weight_file):
-            state_dict = load_file(signle_weight_file)
-            mla_model.load_state_dict(state_dict, strict=False)
-        else:
-            load_sharded_checkpoint(mla_model, args.ckpt_path, strict=False)
+        load_checkpoint(mla_model, args.ckpt_path, strict=False)
 model = mla_model.to(dtype=dtype, device=device).eval()
 
 data_args = MHA2MLADataArguments()
@@ -252,7 +252,7 @@ def get_attn_logits_max(query_states, key_states, scaling, chunk_size=256):
         q = query_states[:, :, start : start + chunk_size, :].to(torch.float32)
         logits = torch.matmul(q, key_states_t) * scaling
 
-        q_pos = torch.arange(start, start + chunk_size, device=logits.device).unsqueeze(-1)   # [q_chunk,1]
+        q_pos = torch.arange(start, start + q.size(-2), device=logits.device).unsqueeze(-1)   # [q_chunk,1]
         k_pos = torch.arange(key_states.size(-2), device=logits.device).unsqueeze(0)   # [1,k_len_total]
         causal_mask = k_pos <= q_pos                                            # [q_chunk,k_len_total]
         logits = logits.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), -100.0)
