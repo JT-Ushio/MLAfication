@@ -40,7 +40,7 @@ target_directory = os.path.join(
 sys.path.append(str(target_directory))
 
 from safetensors.torch import load_file
-from helpers import load_checkpoint
+from helpers import cast_model_parameters, load_checkpoint
 
 
 def create_load_func(mha2mla_args):
@@ -82,6 +82,8 @@ def create_load_func(mha2mla_args):
             mha_model = AutoModelForCausalLM.from_pretrained(
                 mha2mla_args.model_name_or_path,
                 trust_remote_code=config.trust_remote_code,
+                dtype=torch_dtype,
+                low_cpu_mem_usage=True,
             )
             from patching_mla_fwd import patch_mla_fwd_instance
             from patching_mlafication import patch_mlafication
@@ -89,7 +91,7 @@ def create_load_func(mha2mla_args):
             patch_mla_fwd_instance(mla_model)
             # Load weights
             load_checkpoint(mla_model, ckpt_path, strict=False)
-            model = mla_model.to(dtype=torch_dtype)
+            model = cast_model_parameters(mla_model, torch_dtype)
         return model
 
     return _create_auto_model

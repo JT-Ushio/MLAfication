@@ -1,0 +1,32 @@
+{
+  "model_name_or_path": "/models/Qwen3-30B-A3B-Base",
+  "mla_tensor_path": "/models/qwen3-topk8-rank256-disrms.pt",
+  "checkpoint_dir": "/checkpoints/mlafication/full-ep8-run-001",
+  "run_dir": "/runs/mlafication/full-ep8-run-001",
+  "dataset_folders": [
+    "/data/fineweb-edu-dedup", "/data/cosmopedia-v2", "/data/python-edu",
+    "/data/open-web-math", "/data/stackoverflow"
+  ],
+  "dataset_weights": [0.7, 0.15, 0.08, 0.06, 0.01],
+  "sequence_length": 4096,
+  "seed": 42,
+  "ep_size": 8,
+  "required_gpu": "H200",
+  "global_batch_size": 64,
+  "micro_batch_candidates": [8, 4, 2, 1],
+  "probe_steps": 3,
+  "minimum_headroom_gib": 8,
+  "max_steps": 4800,
+  "learning_rate": 0.0001,
+  "warmup_steps": 144,
+  "decay_start_step": 4320,
+  "betas": [0.9, 0.95],
+  "adam_epsilon": 1e-8,
+  "weight_decay": 0.0,
+  "max_grad_norm": 1.0,
+  "temperature": 1.0,
+  "kl_block_rows": 128,
+  "save_steps": 480,
+  "keep_native_checkpoints": 2,
+  "dataloader_workers": 0
+}

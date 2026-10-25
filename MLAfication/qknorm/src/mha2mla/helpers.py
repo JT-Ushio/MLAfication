@@ -20,6 +20,13 @@ from torch.utils.data import Subset
 logger = logging.getLogger(__name__)
 
 
+def cast_model_parameters(model, dtype):
+    """Cast weights while preserving FP32 rotary-frequency buffers."""
+    for parameter in model.parameters():
+        parameter.data = parameter.data.to(dtype=dtype)
+    return model
+
+
 def bundle_mla_tensor(model, output_dir):
     metadata = getattr(model.config, "mha2mla", None)
     if not isinstance(metadata, dict):

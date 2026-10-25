@@ -14,7 +14,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from nanotron.data.nanoset import Nanoset
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -31,8 +30,7 @@ for extra_path in (str(SRC_MHA2MLA_DIR), str(GEN_DIR), str(REPO_ROOT)):
     if extra_path not in sys.path:
         sys.path.insert(0, extra_path)
 
-from helpers import load_checkpoint
-from mha2mla_datasets import MHA2MLADataArguments
+from helpers import cast_model_parameters, load_checkpoint
 
 
 @dataclass
@@ -64,13 +62,16 @@ class MoeStatsCollector:
             mlp = getattr(layer, "mlp", None)
             if not is_moe_block(mlp):
                 continue
-            self.layer_name_to_idx[id(mlp)] = layer_idx
-            self.layers.append((layer_idx, mlp))
+            # Transformers 5 returns selected indices from the router child;
+            # older versions return router logits from the whole MoE block.
+            target = mlp.gate if hasattr(mlp.gate, 'top_k') else mlp
+            self.layer_name_to_idx[id(target)] = layer_idx
+            self.layers.append((layer_idx, target))
             self.route_cache[layer_idx] = []
-            num_experts = int(mlp.num_experts)
+            num_experts = int(target.num_experts)
             self.layer_stats[layer_idx] = {
                 "num_experts": num_experts,
-                "top_k": int(mlp.top_k),
+                "top_k": int(target.top_k),
                 "tokens": 0,
                 "counts": torch.zeros(num_experts, dtype=torch.long),
             }
@@ -98,13 +99,15 @@ class MoeStatsCollector:
 
     def hook(self, module, inputs, output):
         layer_idx = self.layer_name_to_idx[id(module)]
-        router_logits = extract_router_logits(output)
-        if router_logits is None:
-            return
-
         top_k = int(module.top_k)
         num_experts = int(module.num_experts)
-        selected = router_logits.detach().float().topk(top_k, dim=-1).indices
+        if isinstance(output, tuple) and len(output) == 3:
+            selected = output[2].detach()
+        else:
+            router_logits = extract_router_logits(output)
+            if router_logits is None:
+                raise RuntimeError('MoE hook did not expose router logits or selected expert indices')
+            selected = router_logits.detach().float().topk(top_k, dim=-1).indices
         selected = selected.to(torch.long)
         flat_selected = selected.reshape(-1)
 
@@ -349,8 +352,8 @@ def is_moe_block(module):
     return (
         module is not None
         and hasattr(module, "gate")
-        and hasattr(module, "num_experts")
-        and hasattr(module, "top_k")
+        and ((hasattr(module, "num_experts") and hasattr(module, "top_k"))
+             or (hasattr(module.gate, "num_experts") and hasattr(module.gate, "top_k")))
     )
 
 
@@ -417,6 +420,9 @@ def load_model(model_name_or_path, ckpt_path, dtype, device, trust_remote_code):
     mha2mla_args = SimpleNamespace(**mha2mla_cfg)
     if getattr(mha2mla_args, "model_name_or_path", None) is None:
         mha2mla_args.model_name_or_path = model_name_or_path
+    tensor_path = getattr(mha2mla_args, 'mla_tensor_path', None)
+    if tensor_path and not os.path.isabs(tensor_path):
+        mha2mla_args.mla_tensor_path = str(ckpt_path / tensor_path)
 
     if getattr(mha2mla_args, "is_baseline", False):
         load_checkpoint(model, str(ckpt_path), strict=False)
@@ -435,10 +441,13 @@ def load_model(model_name_or_path, ckpt_path, dtype, device, trust_remote_code):
 def move_model(model, device, dtype):
     if dtype == "auto":
         return model.to(device).eval()
-    return model.to(device=device, dtype=dtype).eval()
+    return cast_model_parameters(model, dtype).to(device).eval()
 
 
 def build_dataloader(tokenizer, args):
+    from nanotron.data.nanoset import Nanoset
+    from mha2mla_datasets import MHA2MLADataArguments
+
     os.environ["MHA2MLA_DATA_PATH"] = args.data_path.rstrip("/")
     data_args = MHA2MLADataArguments()
     data_args.sequence_length = args.seq_length
@@ -454,14 +463,25 @@ def build_dataloader(tokenizer, args):
     token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
     tokenizer.model_max_length = origin_model_max_length
 
-    base_dataset = Nanoset(
-        dataset_folders=data_args.dataset_folders,
-        sequence_length=data_args.sequence_length,
-        dataset_weights=data_args.dataset_weights,
-        token_size=token_size,
-        random_seed=args.data_seed,
-        train_split_num_samples=total_num_samples,
-    )
+    # The pinned Nanoset logger expects a default process group even for a
+    # standalone evaluator. Its indexing/data access need no collectives.
+    own_group = not torch.distributed.is_initialized()
+    if own_group:
+        torch.distributed.init_process_group(
+            'gloo', store=torch.distributed.HashStore(), rank=0, world_size=1
+        )
+    try:
+        base_dataset = Nanoset(
+            dataset_folders=data_args.dataset_folders,
+            sequence_length=data_args.sequence_length,
+            dataset_weights=data_args.dataset_weights,
+            token_size=token_size,
+            random_seed=args.data_seed,
+            train_split_num_samples=total_num_samples,
+        )
+    finally:
+        if own_group:
+            torch.distributed.destroy_process_group()
     if args.sample_offset > 0:
         dataset = Subset(
             base_dataset,

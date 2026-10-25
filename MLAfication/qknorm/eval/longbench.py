@@ -46,6 +46,7 @@ target_directory = os.path.join(
 )
 sys.path.append(str(target_directory))
 from arguments import MHA2MLAModelArguments
+from helpers import cast_model_parameters
 
 from safetensors.torch import load_file
 
@@ -742,7 +743,9 @@ def load_model(mha2mla_args, dtype, ckpt_path, cache_args: Optional["CacheArgume
             ckpt_path, mha2mla_args.mla_tensor_path
         )
     if mha2mla_args.is_baseline == True:
-        model = AutoModelForCausalLM.from_pretrained(mha2mla_args.model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            mha2mla_args.model_name_or_path, dtype=dtype, low_cpu_mem_usage=True
+        )
         path = ckpt_path if ckpt_path is not None else mha2mla_args.model_name_or_path
         print("Loading baseline from", path)
         if ckpt_path is not None:
@@ -758,7 +761,9 @@ def load_model(mha2mla_args, dtype, ckpt_path, cache_args: Optional["CacheArgume
         from patching_mlafication import patch_mlafication
         # Instance
         model_config = AutoConfig.from_pretrained(ckpt_path)
-        mha_model = AutoModelForCausalLM.from_pretrained(mha2mla_args.model_name_or_path)
+        mha_model = AutoModelForCausalLM.from_pretrained(
+            mha2mla_args.model_name_or_path, dtype=dtype, low_cpu_mem_usage=True
+        )
         mla_model = patch_mlafication(mha_model, model_config, mha2mla_args)
         patch_mla_fwd_instance(mla_model)
         # Load weights
@@ -768,17 +773,19 @@ def load_model(mha2mla_args, dtype, ckpt_path, cache_args: Optional["CacheArgume
             mla_model.load_state_dict(state_dict, strict=False)
         else:
             load_result = load_sharded_checkpoint(mla_model, ckpt_path, strict=False)
-        model = mla_model.to(dtype=dtype, device=device)
+        model = cast_model_parameters(mla_model, dtype).to(device)
     elif not mha2mla_args.is_baseline:
         print("Loading step0 model from", mha2mla_args.mla_tensor_path)
         patch_mla_fwd_instance = import_qwen3_mla_forward_patcher(cache_args)
         from patching_mlafication import patch_mlafication
         # Instance
         model_config = AutoConfig.from_pretrained(mha2mla_args.model_name_or_path)
-        mha_model = AutoModelForCausalLM.from_pretrained(mha2mla_args.model_name_or_path)
+        mha_model = AutoModelForCausalLM.from_pretrained(
+            mha2mla_args.model_name_or_path, dtype=dtype, low_cpu_mem_usage=True
+        )
         mla_model = patch_mlafication(mha_model, model_config, mha2mla_args)
         patch_mla_fwd_instance(mla_model)
-        model = mla_model.to(device, dtype=dtype)
+        model = cast_model_parameters(mla_model, dtype).to(device)
 
     return model
 
@@ -799,7 +806,7 @@ def main():
     dtype = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = load_model(mha2mla_args, dtype, lb_args.ckpt_path, cache_args).to(device, dtype=dtype)
+    model = load_model(mha2mla_args, dtype, lb_args.ckpt_path, cache_args).to(device)
     tokenizer.pad_token = tokenizer.eos_token
 
     trainer = Trainer(

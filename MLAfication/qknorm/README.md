@@ -62,3 +62,7 @@ latency, throughput, and peak memory without a YAML file.
 
 Do not commit credentials, model weights, generated tensors, checkpoints,
 datasets, logs, virtual environments, or evaluation outputs.
+# Full-parameter MoE control
+
+For EP8 + ZeRO-2 + grouped GEMM + activation-checkpointed distillation, see
+[the full-parameter MoE guide](EP_DISTILL.md).
